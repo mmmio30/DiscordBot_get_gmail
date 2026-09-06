@@ -10,7 +10,9 @@ Discord から Gmail を確認し、届いたワンタイムパスワード（OT
 - **HTMLメール対応** — プレーンテキストが無いメールでもHTMLから本文を取り出す
 - **待ち受けモード** — `/mail` の後そのまま5分間（既定）新着を見張り、コードが届いた瞬間に投稿
 - 全角数字（`４９２８３７`）やスペース区切り（`418 902`）のコードも正規化して認識
-- 日付・金額・西暦・URL内の数字はコード候補から除外
+- **文脈語（認証コード / ワンタイム / verification など）が近くに無い数字は採用しない**ため、
+  住所の郵便番号・電話番号・日付・金額を誤ってコードとして表示しない
+- text/plain が「HTML形式のメールです」という案内だけの場合はHTML側を本文として表示する
 - **毎日AM3:00の自動更新** — git の更新をファストフォワードで取り込み、Bot を再起動
 
 ## 必要条件
@@ -154,6 +156,16 @@ systemctl list-timers discord-bot-update.timer
 
 `deploy/discord-bot.service` は Bot 本体のユニットの控えです。
 既存のユニットと内容が違う場合のみ、必要に応じて差し替えてください。
+
+ただし `Environment=PYTHONUNBUFFERED=1` だけは既存のユニットにも必ず入れてください。
+これが無いと Python の `print()` がブロックバッファされ、`journalctl` に
+起動メッセージやエラーが出ません（discord.py 自身のログは出るため気づきにくい）。
+
+```bash
+systemctl show discord-bot.service -p Environment    # 入っているか確認
+systemctl edit --full discord-bot.service            # [Service] に1行足す
+systemctl restart discord-bot.service
+```
 
 ### 新規に構築する場合
 

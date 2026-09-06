@@ -8,6 +8,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# これが無いと print() がブロックバッファされ、journalctl にログが出ない
+Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/root/discord-bot
 ExecStart=/root/discord-bot/.venv/bin/python /root/discord-bot/main.py
 Restart=always
