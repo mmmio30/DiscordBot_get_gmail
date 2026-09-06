@@ -1,0 +1,16 @@
+# Bot 本体。/opt/DiscordBot_get_gmail に配置する前提。
+# 別の場所に置く場合は WorkingDirectory と ExecStart を書き換えること。
+[Unit]
+Description=Discord Gmail OTP Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/DiscordBot_get_gmail
+ExecStart=/usr/bin/python3 /opt/DiscordBot_get_gmail/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

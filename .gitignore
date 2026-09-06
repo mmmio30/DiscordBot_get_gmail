@@ -1,0 +1,11 @@
+# 認証情報。絶対にコミットしないこと
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 自動更新スクリプトが使うロックファイル
+.auto_update.lock

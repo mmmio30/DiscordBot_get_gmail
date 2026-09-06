@@ -25,8 +25,6 @@ IMAP_PORT = int(os.getenv('IMAP_PORT', 993)) # ここに 993 がセットされ�
 # 待ち受け（/otp）の挙動を調整する設定
 OTP_WATCH_SECONDS = int(os.getenv('OTP_WATCH_SECONDS', 300))     # 待ち受ける時間（既定5分）
 OTP_POLL_INTERVAL = int(os.getenv('OTP_POLL_INTERVAL', 10))      # 新着チェックの間隔（既定10秒）
-OTP_LOOKBACK_SECONDS = int(os.getenv('OTP_LOOKBACK_SECONDS', 120))  # 待ち受け開始時に遡って探す範囲
-OTP_MAX_WATCH_SECONDS = int(os.getenv('OTP_MAX_WATCH_SECONDS', 900))  # 待ち受け時間の上限
 MAIL_DEFAULT_COUNT = int(os.getenv('MAIL_DEFAULT_COUNT', 3))     # /mail で表示する件数
 MAIL_SEARCH_DAYS = int(os.getenv('MAIL_SEARCH_DAYS', 7))         # IMAP検索を何日分に絞るか
 
@@ -303,53 +301,34 @@ def _fetch_one(mail, uid):
     return None
 
 
-def fetch_recent_sync(count):
-    """最新 count 件のメールを新しい順に取得する"""
-    mail = _connect()
-    try:
-        uids = _search_uids(mail)
-        if not uids:
-            return []
-        items = []
-        for uid in reversed(uids[-count:]):
-            item = _fetch_one(mail, uid)
-            if item:
-                items.append(item)
-        return items
-    finally:
-        _close(mail)
-
-
-class MailWatcher:
-    """待ち受け中はIMAP接続を張りっぱなしにして、10秒ごとに新着UIDを見る"""
+class MailSession:
+    """1回の /mail で使うIMAP接続。最新メールの取得と、その後の新着監視を担う"""
 
     def __init__(self):
         self.mail = None
         self.baseline_uid = 0
 
-    def start(self):
+    def open(self):
         self.mail = _connect()
+
+    def fetch_recent(self, count):
+        """最新 count 件を新しい順に取得し、以降の監視の基準UIDを決める"""
         uids = _search_uids(self.mail)
-        self.baseline_uid = int(uids[-1]) if uids else 0
-        recent = []
-        # 待ち受けを始める直前に届いていたメールも拾っておく
-        # （コマンドを打つ前にメールが来ていたケースの救済）
-        threshold = datetime.now(timezone.utc) - timedelta(seconds=OTP_LOOKBACK_SECONDS)
-        for uid in reversed(uids[-5:]):
+        if uids:
+            self.baseline_uid = max(int(u) for u in uids)
+        items = []
+        for uid in reversed(uids[-count:]):
             item = _fetch_one(self.mail, uid)
-            if not item or not item['codes']:
-                continue
-            if item['received_at'] and item['received_at'] >= threshold:
-                recent.append(item)
-        return list(reversed(recent))
+            if item:
+                items.append(item)
+        return items
 
     def _reconnect(self):
-        if self.mail is not None:
-            _close(self.mail)
+        _close(self.mail)
         self.mail = _connect()
 
-    def poll(self):
-        """baseline より新しいUIDのメールを取得し、baseline を進める"""
+    def poll_new(self):
+        """基準UIDより新しいメールを取得し、基準UIDを進める"""
         for attempt in range(2):
             try:
                 self.mail.noop()  # NOOPを挟まないと新着が見えないサーバーがある
@@ -371,10 +350,16 @@ class MailWatcher:
                 raise
         return []
 
-    def stop(self):
+    def close(self):
         if self.mail is not None:
             _close(self.mail)
             self.mail = None
+
+
+def open_and_fetch(session, count):
+    """接続と取得をまとめて1回のスレッド実行で済ませるための関数"""
+    session.open()
+    return session.fetch_recent(count)
 
 
 # --------------------------------------------------------------------------
@@ -430,9 +415,31 @@ def _imap_error_message(error):
 # コマンド
 # --------------------------------------------------------------------------
 
-@bot.command(name='mail')
-async def check_mail(ctx, *args):
-    """最新のメールを表示します。 例: /mail  /mail 5  /mail full"""
+# チャンネルごとに待ち受けを1つだけ持つ
+active_watches = {}
+
+
+class Watch:
+    """待ち受けの締切。待ち受け中に /mail を再送されたら延長する"""
+
+    def __init__(self, deadline):
+        self.deadline = deadline
+
+    def extend(self, seconds):
+        self.deadline = asyncio.get_running_loop().time() + seconds
+        return self.deadline
+
+
+def _format_duration(seconds):
+    """待ち受け時間を「5分」「90秒」のように表示する"""
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"{seconds // 60}分"
+    if seconds >= 60:
+        return f"{seconds // 60}分{seconds % 60}秒"
+    return f"{seconds}秒"
+
+
+def _parse_mail_args(args):
     count = MAIL_DEFAULT_COUNT
     full = False
     for arg in args:
@@ -440,114 +447,98 @@ async def check_mail(ctx, *args):
             full = True
         elif arg.isdigit():
             count = max(1, min(int(arg), 10))
+    return count, full
 
-    await ctx.send("メールを確認しています...")
+
+async def _watch_new_mail(ctx, session, watch_seconds):
+    """新着メールを見張り、ワンタイムパスワードが届いたら投稿して終了する"""
+    loop = asyncio.get_running_loop()
+    watch = Watch(loop.time() + watch_seconds)
+    active_watches[ctx.channel.id] = watch
+
+    await ctx.send(
+        f"📬 **待ち受けを開始しました。** これから{_format_duration(watch_seconds)}の間、"
+        f"{OTP_POLL_INTERVAL}秒ごとに新着メールを確認します。\n"
+        f"ワンタイムパスワードを見つけた時点で投稿して終了します。"
+        f"待ち受け中にもう一度 `/mail` を送ると時間を延長できます。"
+    )
+
+    seen_without_code = 0
     try:
-        items = await asyncio.to_thread(fetch_recent_sync, count)
-    except imaplib.IMAP4.error as e:
-        print(f"IMAPエラー: {e}")
-        await ctx.send(_imap_error_message(e))
-        return
-    except Exception as e:
-        print(f"予期せぬエラー: {e}")
-        await ctx.send(f"メールの確認中にエラーが発生しました: {e}")
-        return
+        while True:
+            remaining = watch.deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(OTP_POLL_INTERVAL, remaining))
 
-    if not items:
-        await ctx.send("受信トレイにメールがありません。")
-        return
-
-    for item in items:
-        await ctx.send(embed=build_mail_embed(item))
-        if full:
-            await send_full_body(ctx, item)
-
-
-# チャンネルごとに待ち受けタスクを1つだけ持つ
-active_watches = {}
-
-
-async def _run_watch(ctx, watch_seconds):
-    watcher = MailWatcher()
-    try:
-        try:
-            already_arrived = await asyncio.to_thread(watcher.start)
-        except imaplib.IMAP4.error as e:
-            print(f"IMAPエラー: {e}")
-            await ctx.send(_imap_error_message(e))
-            return
-        except Exception as e:
-            print(f"予期せぬエラー: {e}")
-            await ctx.send(f"待ち受けの開始に失敗しました: {e}")
-            return
-
-        if already_arrived:
-            await ctx.send(f"直前に届いていたメールからコードが見つかりました（{len(already_arrived)}件）。")
-            for item in already_arrived:
-                await ctx.send(embed=build_mail_embed(item, discord.Color.green()))
-            return
-
-        minutes = watch_seconds / 60
-        await ctx.send(
-            f"📬 これから **{minutes:g}分間** 新着メールを見張ります"
-            f"（{OTP_POLL_INTERVAL}秒ごとに確認）。"
-            f"\nワンタイムパスワードを見つけた時点で自動的に投稿して終了します。"
-            f"途中でやめる場合は `/otpstop` を送ってください。"
-        )
-
-        deadline = asyncio.get_running_loop().time() + watch_seconds
-        seen_without_code = 0
-        while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(OTP_POLL_INTERVAL)
             try:
-                new_items = await asyncio.to_thread(watcher.poll)
+                new_items = await asyncio.to_thread(session.poll_new)
             except Exception as e:
                 print(f"待ち受け中のエラー: {e}")
-                await ctx.send(f"新着の確認中にエラーが発生したため待ち受けを終了します: {e}")
+                await ctx.send(f"⚠️ **待ち受けを終了しました。** 新着の確認中にエラーが発生しました: {e}")
                 return
 
             for item in new_items:
                 if item['codes']:
                     await ctx.send("🔑 ワンタイムパスワードが届きました。")
                     await ctx.send(embed=build_mail_embed(item, discord.Color.green()))
+                    await ctx.send("✅ **待ち受けを終了しました。**")
                     return
                 seen_without_code += 1
                 await ctx.send(embed=build_mail_embed(item, discord.Color.light_grey()))
 
-        note = "" if seen_without_code == 0 else f"（コードを含まない新着は{seen_without_code}件ありました）"
-        await ctx.send(f"⌛ 待ち受け時間が終了しました。ワンタイムパスワードは届きませんでした。{note}")
+        note = "" if seen_without_code == 0 else f"（コードを含まない新着が{seen_without_code}件ありました）"
+        await ctx.send(
+            f"⌛ **待ち受けを終了しました。** ワンタイムパスワードは届きませんでした。{note}"
+        )
     finally:
         active_watches.pop(ctx.channel.id, None)
-        # キャンセル直後でも確実に切断できるよう、await せずに後始末する
-        asyncio.get_running_loop().run_in_executor(None, watcher.stop)
 
 
-@bot.command(name='otp')
-async def watch_otp(ctx, minutes: float = None):
-    """ワンタイムパスワードのメールを待ち受けます。 例: /otp  /otp 10"""
-    if ctx.channel.id in active_watches:
-        await ctx.send("このチャンネルでは既に待ち受け中です。`/otpstop` で停止できます。")
-        return
+@bot.command(name='mail')
+async def check_mail(ctx, *args):
+    """最新のメールを表示し、続けて新着を待ち受けます。 例: /mail  /mail 5  /mail full"""
+    count, full = _parse_mail_args(args)
 
-    watch_seconds = OTP_WATCH_SECONDS if minutes is None else int(minutes * 60)
-    watch_seconds = max(OTP_POLL_INTERVAL, min(watch_seconds, OTP_MAX_WATCH_SECONDS))
-
-    task = asyncio.create_task(_run_watch(ctx, watch_seconds))
-    active_watches[ctx.channel.id] = task
+    await ctx.send("メールを確認しています...")
+    session = MailSession()
+    close_later = True
     try:
-        await task
-    except asyncio.CancelledError:
-        await ctx.send("待ち受けを停止しました。")
+        try:
+            items = await asyncio.to_thread(open_and_fetch, session, count)
+        except imaplib.IMAP4.error as e:
+            print(f"IMAPエラー: {e}")
+            await ctx.send(_imap_error_message(e))
+            return
+        except Exception as e:
+            print(f"予期せぬエラー: {e}")
+            await ctx.send(f"メールの確認中にエラーが発生しました: {e}")
+            return
 
+        if not items:
+            await ctx.send("受信トレイにメールがありません。")
+        for item in items:
+            await ctx.send(embed=build_mail_embed(item))
+            if full:
+                await send_full_body(ctx, item)
 
-@bot.command(name='otpstop')
-async def stop_otp(ctx):
-    """実行中の待ち受けを停止します。"""
-    task = active_watches.get(ctx.channel.id)
-    if task is None:
-        await ctx.send("待ち受けは実行されていません。")
-        return
-    task.cancel()
+        # 既に待ち受け中なら二重に走らせず、締切だけ延ばす
+        watch = active_watches.get(ctx.channel.id)
+        if watch is not None:
+            watch.extend(OTP_WATCH_SECONDS)
+            await ctx.send(
+                f"⏱ 待ち受けを延長しました。あと{_format_duration(OTP_WATCH_SECONDS)}、新着メールを見張ります。"
+            )
+            return
+
+        close_later = False  # 待ち受けが接続を使い続けるので、その終了時に閉じる
+        try:
+            await _watch_new_mail(ctx, session, OTP_WATCH_SECONDS)
+        finally:
+            asyncio.get_running_loop().run_in_executor(None, session.close)
+    finally:
+        if close_later:
+            asyncio.get_running_loop().run_in_executor(None, session.close)
 
 
 if DISCORD_BOT_TOKEN:

@@ -1,17 +1,17 @@
 # Discord Gmail チェッカーボット
 
-このDiscordボットは、Gmailアカウントに接続して最新のメールを確認したり、
-届いたワンタイムパスワード（OTP）を自動で抜き出して表示するボットです。
+Discord から Gmail を確認し、届いたワンタイムパスワード（OTP）を自動で抜き出して
+表示するボットです。Proxmox 上の LXC など、常時起動のサーバーで動かす想定です。
 
 ## 機能
 
-- 最新メールの件名・差出人・本文を表示（表示件数は指定可能）
-- **ワンタイムパスワードの自動抽出** — 本文のどこにコードがあっても拾い出し、Embedの先頭に表示
+- `/mail` の1コマンドで「最新メールの表示」と「新着メールの待ち受け」を両方行う
+- **ワンタイムパスワードの自動抽出** — 本文のどこにコードがあっても拾い出し、先頭に表示
 - **HTMLメール対応** — プレーンテキストが無いメールでもHTMLから本文を取り出す
-- **待ち受けモード（`/otp`）** — 一定時間（既定5分）新着メールを見張り、コードが届いた瞬間に投稿
+- **待ち受けモード** — `/mail` の後そのまま5分間（既定）新着を見張り、コードが届いた瞬間に投稿
 - 全角数字（`４９２８３７`）やスペース区切り（`418 902`）のコードも正規化して認識
-- 日付・金額・URL内の数字はコード候補から除外
-- 日本語メールの適切なデコード対応
+- 日付・金額・西暦・URL内の数字はコード候補から除外
+- **毎日AM3:00の自動更新** — git の更新をファストフォワードで取り込み、Bot を再起動
 
 ## 必要条件
 
@@ -35,17 +35,6 @@ IMAP_SERVER=imap.gmail.com
 IMAP_PORT=993
 ```
 
-### 任意の設定（未設定なら既定値が使われます）
-
-| 変数 | 既定値 | 説明 |
-| --- | --- | --- |
-| `OTP_WATCH_SECONDS` | `300` | `/otp` で待ち受ける秒数 |
-| `OTP_POLL_INTERVAL` | `10` | 新着を確認する間隔（秒） |
-| `OTP_LOOKBACK_SECONDS` | `120` | 待ち受け開始時に何秒前まで遡って探すか |
-| `OTP_MAX_WATCH_SECONDS` | `900` | `/otp 30` のように長く指定された場合の上限 |
-| `MAIL_DEFAULT_COUNT` | `3` | `/mail` で表示する件数 |
-| `MAIL_SEARCH_DAYS` | `7` | IMAP検索を何日分に絞るか（高速化のため） |
-
 ### Gmailの設定
 
 1. Gmailアカウントで2段階認証を有効にする
@@ -53,6 +42,15 @@ IMAP_PORT=993
    - Googleアカウント設定 → セキュリティ → 2段階認証 → アプリパスワード
    - アプリを選択し、パスワードを生成
    - 生成されたパスワードを`.env`ファイルの`EMAIL_PASSWORD`に設定
+
+### 任意の設定（未設定なら既定値が使われます）
+
+| 変数 | 既定値 | 説明 |
+| --- | --- | --- |
+| `OTP_WATCH_SECONDS` | `300` | `/mail` のあと待ち受ける秒数 |
+| `OTP_POLL_INTERVAL` | `10` | 新着を確認する間隔（秒） |
+| `MAIL_DEFAULT_COUNT` | `3` | `/mail` で表示する件数 |
+| `MAIL_SEARCH_DAYS` | `7` | IMAP検索を何日分に絞るか（高速化のため） |
 
 ## 使用方法
 
@@ -65,26 +63,112 @@ python bot.py
 
 | コマンド | 説明 |
 | --- | --- |
-| `/mail` | 最新3件のメールを表示（コードが見つかれば先頭に表示） |
-| `/mail 5` | 最新5件を表示（1〜10件） |
-| `/mail full` | 本文を省略せず全文表示 |
-| `/otp` | 5分間、新着メールを待ち受けてコードが届いたら投稿 |
-| `/otp 10` | 10分間待ち受ける |
-| `/otpstop` | 待ち受けを途中で停止 |
+| `/mail` | 最新3件を表示し、続けて5分間の待ち受けに入る |
+| `/mail 5` | 表示件数を変える（1〜10件）。待ち受けは同じように始まる |
+| `/mail full` | 本文を省略せず全文表示する。待ち受けは同じように始まる |
 
-### 待ち受けモードの使い方
+### `/mail` の流れ
 
-サイト側で「コードを送信」を押す**前**に `/otp` を送っておきます。
-以降、10秒ごとに新着を確認し、ワンタイムパスワードを含むメールが届いた時点で
-自動的に投稿して待ち受けを終了します。`/mail` を何度も叩き直す必要はありません。
+1. 最新3件を表示します。ワンタイムパスワードが含まれていれば先頭に大きく出ます
+2. 続けて「📬 **待ち受けを開始しました。**」と流れ、5分間10秒ごとに新着を確認します
+3. コードを含むメールが届いた時点で投稿し、「✅ **待ち受けを終了しました。**」で終わります
+4. 5分間届かなければ「⌛ **待ち受けを終了しました。**」で終わります
 
-- `/otp` を打った時点で直前（既定120秒以内）にコードのメールが既に届いていた場合は、
-  待たずにその場で表示します。
-- コードを含まない新着メールも通知しますが、その場合は待ち受けを継続します。
+サイト側で「コードを送信」を押す**前**でも**後**でも構いません。
+先に押していれば1のステップで表示され、後から押しても2〜3で拾えます。
+`/mail` を何度も叩き直す必要はありません。
+
+- 待ち受け中にもう一度 `/mail` を送ると、待ち受け時間が5分に延長されます
+  （待ち受けが二重に走ることはありません）
+- コードを含まない新着メールは通知だけして、待ち受けは続きます
+
+## サーバーへの導入と自動更新
+
+`deploy/` に systemd のユニットと自動更新スクリプトが入っています。
+以下は `/opt/DiscordBot_get_gmail` に配置する場合の手順です（root で実行）。
+
+```bash
+# 1. リポジトリを配置
+git clone https://github.com/mmmio30/DiscordBot_get_gmail.git /opt/DiscordBot_get_gmail
+cd /opt/DiscordBot_get_gmail
+git checkout main                 # 追従したいブランチに切り替える
+
+# 2. .env を作成（上記のセットアップを参照）
+vi .env
+
+# 3. タイムゾーンを日本時間にする（AM3:00 の解釈に必要）
+timedatectl set-timezone Asia/Tokyo
+
+# 4. systemd に登録
+cp deploy/discord-gmail-bot.service /etc/systemd/system/
+cp deploy/discord-gmail-bot-update.service /etc/systemd/system/
+cp deploy/discord-gmail-bot-update.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now discord-gmail-bot.service
+systemctl enable --now discord-gmail-bot-update.timer
+
+# 5. 確認
+systemctl status discord-gmail-bot.service
+systemctl list-timers discord-gmail-bot-update.timer
+```
+
+### 自動更新の設定
+
+`.env` に以下を追記します（すべて任意）。
+
+| 変数 | 既定値 | 説明 |
+| --- | --- | --- |
+| `UPDATE_BRANCH` | 現在のブランチ | 追従するブランチ |
+| `BOT_SERVICE_NAME` | （なし） | 更新後に再起動する systemd サービス名。例: `discord-gmail-bot` |
+| `DISCORD_WEBHOOK_URL` | （なし） | 通知先の Discord Webhook URL |
+| `NOTIFY_MAIL_TO` | `EMAIL_ADDRESS` | メール通知の宛先 |
+| `NOTIFY_ON_SUCCESS` | `true` | 更新成功時も通知するか。`false` でログのみ |
+
+通知は Discord Webhook を優先し、未設定または送信失敗の場合は `EMAIL_ADDRESS` の
+Gmail 経由でメールを送ります。**Bot が落ちているときでも通知が届くよう、Bot 自身では
+なく Webhook を使っています。** Webhook は Discord のチャンネル設定 →
+連携サービス → ウェブフック から作成できます。
+
+### 自動更新の動作
+
+毎日 AM3:00 に `deploy/auto_update.sh` が動き、以下を行います。
+
+1. `git fetch` して、追従ブランチに更新があるか確認する。**無ければ何もせず、通知もしない**
+2. ローカルに未コミットの変更がある、または履歴が分岐している場合は
+   **更新せずに通知する**（勝手に上書きしません）
+3. `git merge --ff-only` でファストフォワード更新する
+4. `bot.py` の構文をチェックし、`BOT_SERVICE_NAME` のサービスを再起動する
+5. 構文エラーや起動失敗があれば**元のコミットに戻して再起動し、通知する**
+
+多重起動は `flock` で防いでいます。手動で実行したい場合は次のとおりです。
+
+```bash
+systemctl start discord-gmail-bot-update.service   # 実行
+journalctl -u discord-gmail-bot-update.service -n 50   # ログ確認
+/opt/DiscordBot_get_gmail/deploy/auto_update.sh    # 直接実行してもよい
+```
+
+### cron を使う場合
+
+systemd タイマーの代わりに cron でも構いません。
+
+```cron
+0 3 * * * /opt/DiscordBot_get_gmail/deploy/auto_update.sh >> /var/log/discord-gmail-bot-update.log 2>&1
+```
+
+### 補足
+
+- スクリプトは `systemctl restart` を行うため **root で実行する前提**です。
+  一般ユーザーで動かす場合は、そのユーザーに該当サービスの再起動権限
+  （sudoers か polkit ルール）を与えてください。
+- **リポジトリが private の場合**、AM3:00 の `git fetch` にも認証が必要です。
+  デプロイキー（読み取り専用の SSH 鍵）を GitHub のリポジトリ設定 → Deploy keys に
+  登録し、`git remote set-url origin git@github.com:mmmio30/DiscordBot_get_gmail.git`
+  で SSH に切り替えるのが確実です。
 
 ## 注意事項
 
 - GmailのIMAPアクセスが有効になっていることを確認してください
-- アプリパスワードは安全に管理してください
+- アプリパスワードは安全に管理してください（`.env` は `.gitignore` 済みです）
 - ボットトークンは他人と共有しないでください
 - ワンタイムパスワードがDiscordのチャンネルに残るため、**プライベートなチャンネルでの利用を推奨します**

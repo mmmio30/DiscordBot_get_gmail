@@ -1,0 +1,12 @@
+# 毎日 AM3:00 に更新を確認する。時刻はサーバーのタイムゾーンで解釈されるので、
+# 事前に timedatectl set-timezone Asia/Tokyo を実行しておくこと。
+[Unit]
+Description=Discord Gmail OTP Bot の自動更新（毎日 AM3:00）
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# サーバーが停止していて実行できなかった場合、起動後に追いかけて実行する
+Persistent=true
+
+[Install]
+WantedBy=timers.target
