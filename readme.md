@@ -16,14 +16,13 @@ Discord から Gmail を確認し、届いたワンタイムパスワード（OT
 ## 必要条件
 
 - Python 3.9以上（`asyncio.to_thread` を使用しています）
-- discord.py
-- python-dotenv
+- `requirements.txt` の依存パッケージ（discord.py / python-dotenv）
 
 ## セットアップ
 
 1. 必要なパッケージをインストール:
 ```bash
-pip install discord.py python-dotenv
+pip install -r requirements.txt
 ```
 
 2. `.env`ファイルを作成し、以下の環境変数を設定:
@@ -85,40 +84,58 @@ python main.py
 ## サーバーへの導入と自動更新
 
 `deploy/` に systemd のユニットと自動更新スクリプトが入っています。
-Bot は `/root/discord-bot` に置き、`main.py` を実行する前提です。
-別の場所に置く場合は `deploy/*.service` の `WorkingDirectory` と `ExecStart` を
-書き換えてください。
+想定している構成は次のとおりです。
+
+| 項目 | 値 |
+| --- | --- |
+| 配置場所 | `/root/discord-bot` |
+| 実行ファイル | `main.py` |
+| Python | `/root/discord-bot/.venv/bin/python`（venv） |
+| サービス名 | `discord-bot.service` |
+
+別の構成にする場合は `deploy/*.service` の `WorkingDirectory` と `ExecStart`、
+および `.env` の `BOT_SERVICE_NAME` を書き換えてください。
 
 ### 既に手動で動かしている場合（既存ディレクトリを git 管理に切り替える）
 
 `/root/discord-bot` に `main.py` を直接置いて動かしている状態からの移行手順です。
-`.env` は `.gitignore` 済みなので、この操作では消えません。
+`.env` と `.venv` は `.gitignore` 済みなので、この操作では消えません。
 
 ```bash
-# 0. 動いている Bot を止め、念のため現物を退避する
-pkill -f main.py || true
+# 0. git を入れる（未インストールの場合）
+apt update && apt install -y git
+
+# 1. Bot を止め、念のため現物を退避する
+systemctl stop discord-bot.service
 cd /root/discord-bot
 cp main.py main.py.backup
 cp .env .env.backup
 
-# 1. git リポジトリとして紐付ける
+# 2. git リポジトリとして紐付ける
 git init -b main
 git remote add origin https://github.com/mmmio30/DiscordBot_get_gmail.git
 git fetch origin
 
-# 2. 追従したいブランチに切り替える（既存の main.py は上書きされる）
+# 3. 追従したいブランチに切り替える（既存の main.py は上書きされる）
 #    main 以外に追従する場合はブランチ名を読み替え、.env の UPDATE_BRANCH にも書くこと
 git checkout -f -b main origin/main
 
-# 3. 中身が入れ替わったことを確認する
+# 4. 中身が入れ替わったことを確認する
 git log --oneline -3
 ls -a
 
-# 4. 依存パッケージを入れる
-pip install discord.py python-dotenv
+# 5. 依存パッケージを venv に入れる
+.venv/bin/pip install -r requirements.txt
+
+# 6. 起動して動作を確認する
+systemctl start discord-bot.service
+journalctl -u discord-bot.service -f     # 「〜としてログインしました」が出れば成功
 ```
 
-### systemd への登録
+### 自動更新を systemd タイマーに登録する
+
+既に `discord-bot.service` が動いているなら、**それはそのままで構いません。**
+登録するのは更新用のユニットとタイマーだけです。
 
 ```bash
 cd /root/discord-bot
@@ -126,28 +143,32 @@ cd /root/discord-bot
 # タイムゾーンを日本時間にする（AM3:00 の解釈に必要）
 timedatectl set-timezone Asia/Tokyo
 
-cp deploy/discord-gmail-bot.service /etc/systemd/system/
-cp deploy/discord-gmail-bot-update.service /etc/systemd/system/
-cp deploy/discord-gmail-bot-update.timer /etc/systemd/system/
+cp deploy/discord-bot-update.service /etc/systemd/system/
+cp deploy/discord-bot-update.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now discord-gmail-bot.service
-systemctl enable --now discord-gmail-bot-update.timer
+systemctl enable --now discord-bot-update.timer
 
-# 確認
-systemctl status discord-gmail-bot.service
-systemctl list-timers discord-gmail-bot-update.timer
-journalctl -u discord-gmail-bot.service -f
+# 確認（次回の実行予定時刻が出る）
+systemctl list-timers discord-bot-update.timer
 ```
+
+`deploy/discord-bot.service` は Bot 本体のユニットの控えです。
+既存のユニットと内容が違う場合のみ、必要に応じて差し替えてください。
 
 ### 新規に構築する場合
 
 ```bash
+apt update && apt install -y git python3-venv
 git clone https://github.com/mmmio30/DiscordBot_get_gmail.git /root/discord-bot
 cd /root/discord-bot
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 vi .env                        # 上記のセットアップを参照
-pip install discord.py python-dotenv
+cp deploy/discord-bot.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now discord-bot.service
 ```
-このあと「systemd への登録」に進みます。
+このあと「自動更新を systemd タイマーに登録する」に進みます。
 
 ### 自動更新の設定
 
@@ -156,7 +177,7 @@ pip install discord.py python-dotenv
 | 変数 | 既定値 | 説明 |
 | --- | --- | --- |
 | `UPDATE_BRANCH` | 現在のブランチ | 追従するブランチ |
-| `BOT_SERVICE_NAME` | （なし） | 更新後に再起動する systemd サービス名。例: `discord-gmail-bot` |
+| `BOT_SERVICE_NAME` | （なし） | 更新後に再起動する systemd サービス名。例: `discord-bot` |
 | `DISCORD_WEBHOOK_URL` | （なし） | 通知先の Discord Webhook URL |
 | `NOTIFY_MAIL_TO` | `EMAIL_ADDRESS` | メール通知の宛先 |
 | `NOTIFY_ON_SUCCESS` | `true` | 更新成功時も通知するか。`false` でログのみ |
@@ -174,14 +195,16 @@ Gmail 経由でメールを送ります。**Bot が落ちているときでも�
 2. ローカルに未コミットの変更がある、または履歴が分岐している場合は
    **更新せずに通知する**（勝手に上書きしません）
 3. `git merge --ff-only` でファストフォワード更新する
-4. Python ファイルの構文をチェックし、`BOT_SERVICE_NAME` のサービスを再起動する
-5. 構文エラーや起動失敗があれば**元のコミットに戻して再起動し、通知する**
+4. `requirements.txt` が変わっていれば venv に依存を入れ直す
+5. Python ファイルの構文をチェックし、`BOT_SERVICE_NAME` のサービスを再起動する
+6. 依存の更新・構文チェック・起動のいずれかに失敗すれば
+   **元のコミットに戻して再起動し、通知する**
 
 多重起動は `flock` で防いでいます。手動で実行したい場合は次のとおりです。
 
 ```bash
-systemctl start discord-gmail-bot-update.service   # 実行
-journalctl -u discord-gmail-bot-update.service -n 50   # ログ確認
+systemctl start discord-bot-update.service   # 実行
+journalctl -u discord-bot-update.service -n 50   # ログ確認
 /root/discord-bot/deploy/auto_update.sh    # 直接実行してもよい
 ```
 
@@ -190,7 +213,7 @@ journalctl -u discord-gmail-bot-update.service -n 50   # ログ確認
 systemd タイマーの代わりに cron でも構いません。
 
 ```cron
-0 3 * * * /root/discord-bot/deploy/auto_update.sh >> /var/log/discord-gmail-bot-update.log 2>&1
+0 3 * * * /root/discord-bot/deploy/auto_update.sh >> /var/log/discord-bot-update.log 2>&1
 ```
 
 ### 補足

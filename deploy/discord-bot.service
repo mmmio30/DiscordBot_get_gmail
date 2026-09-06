@@ -1,0 +1,17 @@
+# Bot 本体。既に同名のサービスが動いている場合は、そのままで構わない
+# （このファイルは構成の控えと、新規構築時のひな形を兼ねる）。
+# .venv 上で動かす前提。別の場所に置く場合はパスを書き換えること。
+[Unit]
+Description=Discord Mail Bot Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/discord-bot
+ExecStart=/root/discord-bot/.venv/bin/python /root/discord-bot/main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

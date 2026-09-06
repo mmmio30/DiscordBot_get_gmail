@@ -1,7 +1,7 @@
 # タイマーから呼ばれる更新処理。単体で叩けば任意のタイミングでも更新できる:
-#   systemctl start discord-gmail-bot-update.service
+#   systemctl start discord-bot-update.service
 [Unit]
-Description=Discord Gmail OTP Bot の自動更新
+Description=Discord Mail Bot の自動更新
 After=network-online.target
 Wants=network-online.target
 

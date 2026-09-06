@@ -12,7 +12,7 @@
 #
 # 設定は .env に書く（すべて任意）:
 #   UPDATE_BRANCH=main                 追従するブランチ（既定: 現在のブランチ）
-#   BOT_SERVICE_NAME=discord-gmail-bot 更新後に再起動する systemd サービス名
+#   BOT_SERVICE_NAME=discord-bot        更新後に再起動する systemd サービス名
 #   DISCORD_WEBHOOK_URL=https://...    通知先の Discord Webhook
 #   NOTIFY_MAIL_TO=you@example.com     メール通知の宛先（既定: EMAIL_ADDRESS）
 #   NOTIFY_ON_SUCCESS=true             更新成功時も通知するか（既定: true）
@@ -21,6 +21,10 @@ set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_DIR/.env"
+
+# 検証や依存の更新は、Bot を動かしているインタープリタで行う
+PYTHON="$REPO_DIR/.venv/bin/python"
+[ -x "$PYTHON" ] || PYTHON="$(command -v python3)"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -41,7 +45,7 @@ send_mail() {
     EMAIL_ADDRESS="$(env_get EMAIL_ADDRESS)" \
     EMAIL_PASSWORD="$(env_get EMAIL_PASSWORD)" \
     NOTIFY_MAIL_TO="$(env_get NOTIFY_MAIL_TO)" \
-    python3 "$REPO_DIR/deploy/notify_mail.py" "$1" 2>&1 | while read -r line; do log "$line"; done
+    "$PYTHON" "$REPO_DIR/deploy/notify_mail.py" "$1" 2>&1 | while read -r line; do log "$line"; done
 }
 
 notify() {
@@ -49,7 +53,7 @@ notify() {
     log "通知: ${text//$'\n'/ / }"
     if [ -n "$WEBHOOK_URL" ]; then
         local payload
-        payload="$(printf '%s' "$text" | python3 -c 'import json,sys; print(json.dumps({"content": sys.stdin.read()[:1900]}))')"
+        payload="$(printf '%s' "$text" | "$PYTHON" -c 'import json,sys; print(json.dumps({"content": sys.stdin.read()[:1900]}))')"
         if curl -fsS -m 20 -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK_URL" >/dev/null; then
             return 0
         fi
@@ -117,10 +121,21 @@ rollback() {
     return 0
 }
 
+# 依存が増えた更新で Bot が起動しなくなるのを防ぐ
+if git diff --name-only "$LOCAL" HEAD | grep -qx 'requirements.txt'; then
+    log "requirements.txt が変わったので依存パッケージを更新します"
+    PIP_OUT="$("$PYTHON" -m pip install -r requirements.txt 2>&1)"
+    if [ $? -ne 0 ]; then
+        rollback
+        fail "依存パッケージの更新に失敗したため、${LOCAL:0:7} に戻しました
+$(printf '%s' "$PIP_OUT" | tail -n 20)"
+    fi
+fi
+
 # 追跡されている Python ファイルをまとめて構文チェックする（ファイル名に依存しない）
 mapfile -t PY_FILES < <(git ls-files '*.py')
 if [ ${#PY_FILES[@]} -gt 0 ]; then
-    COMPILE_OUT="$(python3 -m py_compile "${PY_FILES[@]}" 2>&1)"
+    COMPILE_OUT="$("$PYTHON" -m py_compile "${PY_FILES[@]}" 2>&1)"
     if [ $? -ne 0 ]; then
         rollback
         fail "更新後の Python ファイルに構文エラーがあったため、${LOCAL:0:7} に戻しました
