@@ -70,6 +70,19 @@ def decode_mime_header(header_value):
     return text
 
 
+_ZERO_WIDTH_RE = re.compile(r'[\u200b-\u200f\u2028\u2029\u2060\ufeff]')
+
+
+def normalize_whitespace(text):
+    """ゼロ幅文字を除き、改行以外の空白（全角スペースやnbspを含む）を1つにまとめる"""
+    text = _ZERO_WIDTH_RE.sub('', text)
+    text = re.sub(r'\r\n?', '\n', text)
+    text = re.sub(r'[^\S\n]+', ' ', text)
+    text = re.sub(r'[^\S\n]*\n[^\S\n]*', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 def html_to_text(html_text):
     """HTMLメールをざっくりプレーンテキストに変換する関数"""
     text = re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', ' ', html_text)
@@ -77,11 +90,7 @@ def html_to_text(html_text):
     text = re.sub(r'(?i)</(p|div|tr|li|h[1-6]|table)\s*>', '\n', text)
     text = re.sub(r'(?s)<[^>]+>', ' ', text)
     text = html_lib.unescape(text)
-    text = text.replace(' ', ' ')
-    text = re.sub(r'[ \t　]+', ' ', text)
-    text = re.sub(r'\n[ \t]+', '\n', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
+    return normalize_whitespace(text)
 
 
 def _decode_payload(part):
@@ -96,8 +105,17 @@ def _decode_payload(part):
         return payload.decode('utf-8', errors='replace')
 
 
-def get_email_body(msg):
-    """メール本文を取得する関数（text/plain 優先、無ければ text/html をテキスト化）"""
+# text/plain がこの長さ未満なら「HTMLメールです」という案内だけの可能性が高い
+PLAIN_STUB_LIMIT = 300
+
+
+def extract_bodies(msg):
+    """表示用の本文と、コード探索用のテキストを返す。
+
+    multipart/alternative のメールでは text/plain が
+    「本メールはHTML形式です」という案内だけのことがあるため、
+    表示には中身のある方を選び、探索は両方を対象にする。
+    """
     plain_parts = []
     html_parts = []
 
@@ -119,39 +137,66 @@ def get_email_body(msg):
         else:
             plain_parts.append(_decode_payload(msg))
 
-    body = "\n".join(p for p in plain_parts if p.strip()).strip()
-    if not body:
-        # HTMLしか無い認証メールが多いので、その場合はHTMLから抽出する
-        body = "\n".join(html_to_text(h) for h in html_parts if h.strip()).strip()
-    return body or "(本文を取得できませんでした)"
+    plain = normalize_whitespace("\n".join(p for p in plain_parts if p.strip()))
+    html = "\n".join(html_to_text(h) for h in html_parts if h.strip()).strip()
+
+    if not plain:
+        display = html
+    elif not html:
+        display = plain
+    elif len(plain) < PLAIN_STUB_LIMIT and len(html) > len(plain):
+        display = html   # プレーンテキストが案内文だけの場合はHTML側を見せる
+    else:
+        display = plain
+
+    scan = "\n".join(t for t in (plain, html) if t)
+    return (display or "(本文を取得できませんでした)"), (scan or display)
 
 
 # --------------------------------------------------------------------------
 # ワンタイムパスワードの抽出
 # --------------------------------------------------------------------------
 
-# コードの近くに出てくる語。多いほど「これがOTPだ」と判断しやすくなる
-CONTEXT_KEYWORDS = (
+# コードの近くに出てくる語。これが1つも無い数字は候補にしない。
+# STRONG はほぼ認証メール特有の語、WEAK は一般のメールにも出うる語。
+STRONG_KEYWORDS = (
     'ワンタイム', '認証コード', '確認コード', 'セキュリティコード', 'パスコード',
-    '認証番号', '確認番号', '本人確認', '確認用', '認証用', 'コード', '暗証',
-    'verification', 'verify', 'security code', 'one-time', 'one time', 'onetime',
-    'passcode', 'pass code', 'otp', 'authentication', 'auth code', 'access code',
-    'confirmation', 'code', 'pin',
+    '認証番号', '確認番号', '本人確認', '確認用', '認証用', '暗証番号',
+    '二段階認証', '2段階認証', 'ログインコード',
+    'verification code', 'security code', 'one-time', 'one time', 'onetime',
+    'passcode', 'pass code', 'otp', 'access code', 'auth code',
+    'authentication code', 'login code', 'sign-in code', '2fa',
+)
+WEAK_KEYWORDS = (
+    'コード', '認証', '確認', 'パスワード', '暗証',
+    'verification', 'verify', 'authentication', 'confirmation',
+    'code', 'pin', 'password',
 )
 
 _URL_RE = re.compile(r'https?://\S+')
 _DIGIT_CODE_RE = re.compile(r'(?<![0-9A-Za-z])(\d{4,8})(?![0-9A-Za-z])')
 _SPACED_CODE_RE = re.compile(r'(?<![0-9A-Za-z])(\d{3})[ \-](\d{3})(?![0-9A-Za-z])')
 _ALNUM_CODE_RE = re.compile(r'(?<![0-9A-Za-z])([0-9A-Za-z]{5,8})(?![0-9A-Za-z])')
+# 「... Menlo Park, CA 94025」のような米国の郵便番号
+_US_ZIP_RE = re.compile(r'[A-Z]{2}[ \u3000]*$')
+
+# コードの前後を見る範囲。HTMLメールは見出しとコードの間が空きやすいので前は広めにとる
+LOOKBEHIND = 120
+LOOKAHEAD = 60
 
 
-def _has_keyword(text):
+def _keyword_strength(text):
+    """文脈語の強さを返す。2=認証メール特有の語、1=一般的な語、0=なし"""
     lowered = text.lower()
-    return any(keyword in lowered for keyword in CONTEXT_KEYWORDS)
+    if any(keyword in lowered for keyword in STRONG_KEYWORDS):
+        return 2
+    if any(keyword in lowered for keyword in WEAK_KEYWORDS):
+        return 1
+    return 0
 
 
 def _looks_like_noise(before, after):
-    """日付・時刻・金額・URLの一部など、OTPではない数字を弾く"""
+    """日付・時刻・金額など、OTPではない数字を弾く"""
     if re.search(r'[¥$￥]\s*$', before):
         return True
     if re.match(r'\s*(円|年|月|日|時|分|秒|件|通|%|％)', after):
@@ -169,22 +214,24 @@ def _collect_candidates(text, in_subject, url_spans, results):
     def add(code, start, end, bonus=0):
         if any(start >= s and end <= e for s, e in url_spans):
             return
-        before = text[max(0, start - 70):start]
-        after = text[end:end + 50]
+        before = text[max(0, start - LOOKBEHIND):start]
+        after = text[end:end + LOOKAHEAD]
         if _looks_like_noise(before, after):
             return
-
-        near_keyword_before = _has_keyword(before)
-        near_keyword_after = _has_keyword(after)
-        if (len(code) == 4 and code.isdigit() and 1900 <= int(code) <= 2099
-                and not (near_keyword_before or near_keyword_after)):
+        if len(code) == 5 and code.isdigit() and _US_ZIP_RE.search(before):
+            return  # フッターの住所にある郵便番号
+        if len(code) == 4 and code.isdigit() and 1900 <= int(code) <= 2099:
             return  # コピーライト表記などの西暦
 
+        strength_before = _keyword_strength(before)
+        strength_after = _keyword_strength(after)
+        if strength_before == 0 and strength_after == 0:
+            # 文脈語がまったく無い数字は、住所や電話番号である可能性の方が高い
+            return
+
         score = bonus
-        if near_keyword_before:
-            score += 40
-        if near_keyword_after:
-            score += 25
+        score += (0, 25, 60)[strength_before]
+        score += (0, 15, 40)[strength_after]
         if in_subject:
             score += 20
 
@@ -208,8 +255,6 @@ def _collect_candidates(text, in_subject, url_spans, results):
         code = match.group(1)
         if code.isdigit() or code.isalpha():
             continue  # 数字のみは上で処理済み、英字のみはただの単語
-        if not any(c.isdigit() for c in code):
-            continue
         add(code, match.start(1), match.end(1))
 
 
@@ -279,7 +324,7 @@ def _fetch_one(mail, uid):
         msg = email.message_from_bytes(response_part[1])
         subject = decode_mime_header(msg['subject'])
         from_ = decode_mime_header(msg['from'])
-        body = get_email_body(msg)
+        body, scan_text = extract_bodies(msg)
 
         received_at = None
         if msg['date']:
@@ -296,7 +341,7 @@ def _fetch_one(mail, uid):
             'subject': subject,
             'body': body,
             'received_at': received_at,
-            'codes': extract_otp_candidates(subject, body),
+            'codes': extract_otp_candidates(subject, scan_text),
         }
     return None
 
