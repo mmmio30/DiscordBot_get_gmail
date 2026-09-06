@@ -7,5 +7,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/DiscordBot_get_gmail
-ExecStart=/opt/DiscordBot_get_gmail/deploy/auto_update.sh
+WorkingDirectory=/root/discord-bot
+ExecStart=/root/discord-bot/deploy/auto_update.sh

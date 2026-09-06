@@ -9,3 +9,6 @@ venv/
 
 # 自動更新スクリプトが使うロックファイル
 .auto_update.lock
+
+# 移行時のバックアップ
+*.backup

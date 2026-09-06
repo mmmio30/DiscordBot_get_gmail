@@ -117,11 +117,15 @@ rollback() {
     return 0
 }
 
-COMPILE_OUT="$(python3 -m py_compile bot.py 2>&1)"
-if [ $? -ne 0 ]; then
-    rollback
-    fail "更新後の bot.py に構文エラーがあったため、${LOCAL:0:7} に戻しました
+# 追跡されている Python ファイルをまとめて構文チェックする（ファイル名に依存しない）
+mapfile -t PY_FILES < <(git ls-files '*.py')
+if [ ${#PY_FILES[@]} -gt 0 ]; then
+    COMPILE_OUT="$(python3 -m py_compile "${PY_FILES[@]}" 2>&1)"
+    if [ $? -ne 0 ]; then
+        rollback
+        fail "更新後の Python ファイルに構文エラーがあったため、${LOCAL:0:7} に戻しました
 $COMPILE_OUT"
+    fi
 fi
 
 if [ -n "$BOT_SERVICE" ]; then

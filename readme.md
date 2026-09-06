@@ -56,7 +56,7 @@ IMAP_PORT=993
 
 1. ボットを起動:
 ```bash
-python bot.py
+python main.py
 ```
 
 2. Discordで以下のコマンドを使用:
@@ -85,21 +85,47 @@ python bot.py
 ## サーバーへの導入と自動更新
 
 `deploy/` に systemd のユニットと自動更新スクリプトが入っています。
-以下は `/opt/DiscordBot_get_gmail` に配置する場合の手順です（root で実行）。
+Bot は `/root/discord-bot` に置き、`main.py` を実行する前提です。
+別の場所に置く場合は `deploy/*.service` の `WorkingDirectory` と `ExecStart` を
+書き換えてください。
+
+### 既に手動で動かしている場合（既存ディレクトリを git 管理に切り替える）
+
+`/root/discord-bot` に `main.py` を直接置いて動かしている状態からの移行手順です。
+`.env` は `.gitignore` 済みなので、この操作では消えません。
 
 ```bash
-# 1. リポジトリを配置
-git clone https://github.com/mmmio30/DiscordBot_get_gmail.git /opt/DiscordBot_get_gmail
-cd /opt/DiscordBot_get_gmail
-git checkout main                 # 追従したいブランチに切り替える
+# 0. 動いている Bot を止め、念のため現物を退避する
+pkill -f main.py || true
+cd /root/discord-bot
+cp main.py main.py.backup
+cp .env .env.backup
 
-# 2. .env を作成（上記のセットアップを参照）
-vi .env
+# 1. git リポジトリとして紐付ける
+git init -b main
+git remote add origin https://github.com/mmmio30/DiscordBot_get_gmail.git
+git fetch origin
 
-# 3. タイムゾーンを日本時間にする（AM3:00 の解釈に必要）
+# 2. 追従したいブランチに切り替える（既存の main.py は上書きされる）
+#    main 以外に追従する場合はブランチ名を読み替え、.env の UPDATE_BRANCH にも書くこと
+git checkout -f -b main origin/main
+
+# 3. 中身が入れ替わったことを確認する
+git log --oneline -3
+ls -a
+
+# 4. 依存パッケージを入れる
+pip install discord.py python-dotenv
+```
+
+### systemd への登録
+
+```bash
+cd /root/discord-bot
+
+# タイムゾーンを日本時間にする（AM3:00 の解釈に必要）
 timedatectl set-timezone Asia/Tokyo
 
-# 4. systemd に登録
 cp deploy/discord-gmail-bot.service /etc/systemd/system/
 cp deploy/discord-gmail-bot-update.service /etc/systemd/system/
 cp deploy/discord-gmail-bot-update.timer /etc/systemd/system/
@@ -107,10 +133,21 @@ systemctl daemon-reload
 systemctl enable --now discord-gmail-bot.service
 systemctl enable --now discord-gmail-bot-update.timer
 
-# 5. 確認
+# 確認
 systemctl status discord-gmail-bot.service
 systemctl list-timers discord-gmail-bot-update.timer
+journalctl -u discord-gmail-bot.service -f
 ```
+
+### 新規に構築する場合
+
+```bash
+git clone https://github.com/mmmio30/DiscordBot_get_gmail.git /root/discord-bot
+cd /root/discord-bot
+vi .env                        # 上記のセットアップを参照
+pip install discord.py python-dotenv
+```
+このあと「systemd への登録」に進みます。
 
 ### 自動更新の設定
 
@@ -137,7 +174,7 @@ Gmail 経由でメールを送ります。**Bot が落ちているときでも�
 2. ローカルに未コミットの変更がある、または履歴が分岐している場合は
    **更新せずに通知する**（勝手に上書きしません）
 3. `git merge --ff-only` でファストフォワード更新する
-4. `bot.py` の構文をチェックし、`BOT_SERVICE_NAME` のサービスを再起動する
+4. Python ファイルの構文をチェックし、`BOT_SERVICE_NAME` のサービスを再起動する
 5. 構文エラーや起動失敗があれば**元のコミットに戻して再起動し、通知する**
 
 多重起動は `flock` で防いでいます。手動で実行したい場合は次のとおりです。
@@ -145,7 +182,7 @@ Gmail 経由でメールを送ります。**Bot が落ちているときでも�
 ```bash
 systemctl start discord-gmail-bot-update.service   # 実行
 journalctl -u discord-gmail-bot-update.service -n 50   # ログ確認
-/opt/DiscordBot_get_gmail/deploy/auto_update.sh    # 直接実行してもよい
+/root/discord-bot/deploy/auto_update.sh    # 直接実行してもよい
 ```
 
 ### cron を使う場合
@@ -153,7 +190,7 @@ journalctl -u discord-gmail-bot-update.service -n 50   # ログ確認
 systemd タイマーの代わりに cron でも構いません。
 
 ```cron
-0 3 * * * /opt/DiscordBot_get_gmail/deploy/auto_update.sh >> /var/log/discord-gmail-bot-update.log 2>&1
+0 3 * * * /root/discord-bot/deploy/auto_update.sh >> /var/log/discord-gmail-bot-update.log 2>&1
 ```
 
 ### 補足
@@ -161,10 +198,11 @@ systemd タイマーの代わりに cron でも構いません。
 - スクリプトは `systemctl restart` を行うため **root で実行する前提**です。
   一般ユーザーで動かす場合は、そのユーザーに該当サービスの再起動権限
   （sudoers か polkit ルール）を与えてください。
-- **リポジトリが private の場合**、AM3:00 の `git fetch` にも認証が必要です。
-  デプロイキー（読み取り専用の SSH 鍵）を GitHub のリポジトリ設定 → Deploy keys に
-  登録し、`git remote set-url origin git@github.com:mmmio30/DiscordBot_get_gmail.git`
-  で SSH に切り替えるのが確実です。
+- リポジトリが public のため、AM3:00 の `git fetch` に認証は不要です。
+  後から private にした場合は、デプロイキー（読み取り専用の SSH 鍵）を
+  GitHub のリポジトリ設定 → Deploy keys に登録し、
+  `git remote set-url origin git@github.com:mmmio30/DiscordBot_get_gmail.git`
+  で SSH に切り替えてください。
 
 ## 注意事項
 
