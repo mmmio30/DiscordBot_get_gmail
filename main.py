@@ -504,10 +504,11 @@ async def _watch_new_mail(ctx, session, watch_seconds):
     await ctx.send(
         f"📬 **待ち受けを開始しました。** これから{_format_duration(watch_seconds)}の間、"
         f"{OTP_POLL_INTERVAL}秒ごとに新着メールを確認します。\n"
-        f"ワンタイムパスワードを見つけた時点で投稿して終了します。"
-        f"待ち受け中にもう一度 `/mail` を送ると時間を延長できます。"
+        f"ワンタイムパスワードが届いたら投稿します。見つかっても待ち受けは打ち切らず、"
+        f"時間いっぱいまで続けます。待ち受け中にもう一度 `/mail` を送ると時間を延長できます。"
     )
 
+    found_with_code = 0
     seen_without_code = 0
     try:
         while True:
@@ -525,17 +526,20 @@ async def _watch_new_mail(ctx, session, watch_seconds):
 
             for item in new_items:
                 if item['codes']:
+                    found_with_code += 1
                     await ctx.send("🔑 ワンタイムパスワードが届きました。")
                     await ctx.send(embed=build_mail_embed(item, discord.Color.green()))
-                    await ctx.send("✅ **待ち受けを終了しました。**")
-                    return
-                seen_without_code += 1
-                await ctx.send(embed=build_mail_embed(item, discord.Color.light_grey()))
+                else:
+                    seen_without_code += 1
+                    await ctx.send(embed=build_mail_embed(item, discord.Color.light_grey()))
 
-        note = "" if seen_without_code == 0 else f"（コードを含まない新着が{seen_without_code}件ありました）"
-        await ctx.send(
-            f"⌛ **待ち受けを終了しました。** ワンタイムパスワードは届きませんでした。{note}"
-        )
+        if found_with_code:
+            summary = f"ワンタイムパスワードを{found_with_code}件お知らせしました。"
+        else:
+            summary = "ワンタイムパスワードは届きませんでした。"
+        if seen_without_code:
+            summary += f"（コードを含まない新着が{seen_without_code}件ありました）"
+        await ctx.send(f"{'✅' if found_with_code else '⌛'} **待ち受けを終了しました。** {summary}")
     finally:
         active_watches.pop(ctx.channel.id, None)
 
