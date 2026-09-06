@@ -1,0 +1,11 @@
+# タイマーから呼ばれる更新処理。単体で叩けば任意のタイミングでも更新できる:
+#   systemctl start discord-bot-update.service
+[Unit]
+Description=Discord Mail Bot の自動更新
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/discord-bot
+ExecStart=/root/discord-bot/deploy/auto_update.sh
