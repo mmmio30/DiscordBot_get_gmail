@@ -10,6 +10,7 @@ from email.header import decode_header
 from email.utils import parsedate_to_datetime
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -33,6 +34,13 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='/', intents=intents)
+
+
+@bot.event
+async def setup_hook():
+    # スラッシュコマンドをDiscordに登録し、入力欄の候補に出るようにする
+    synced = await bot.tree.sync()
+    print(f"スラッシュコマンドを登録しました: {', '.join('/' + c.name for c in synced)}")
 
 
 @bot.event
@@ -435,7 +443,7 @@ def build_mail_embed(item, color=discord.Color.blue()):
     embed.add_field(name="本文", value=_trim(body, 1024), inline=False)
 
     if len(body) > 1024:
-        embed.set_footer(text="本文が長いため省略しています。全文は /mail full で表示できます。")
+        embed.set_footer(text="本文が長いため省略しています。全文は /mail full:True で表示できます。")
     elif item['received_at']:
         embed.set_footer(text=item['received_at'].astimezone().strftime('%Y-%m-%d %H:%M:%S'))
     return embed
@@ -484,24 +492,15 @@ def _format_duration(seconds):
     return f"{seconds}秒"
 
 
-def _parse_mail_args(args):
-    count = MAIL_DEFAULT_COUNT
-    full = False
-    for arg in args:
-        if arg.lower() in ('full', 'all', '全文'):
-            full = True
-        elif arg.isdigit():
-            count = max(1, min(int(arg), 10))
-    return count, full
-
-
 async def _watch_new_mail(ctx, session, watch_seconds):
     """新着メールを見張り、ワンタイムパスワードが届いたら投稿して終了する"""
     loop = asyncio.get_running_loop()
     watch = Watch(loop.time() + watch_seconds)
     active_watches[ctx.channel.id] = watch
+    # スラッシュコマンドの応答トークンは15分で切れるため、延長された待ち受けはチャンネルに直接投稿する
+    send = ctx.channel.send
 
-    await ctx.send(
+    await send(
         f"📬 **待ち受けを開始しました。** これから{_format_duration(watch_seconds)}の間、"
         f"{OTP_POLL_INTERVAL}秒ごとに新着メールを確認します。\n"
         f"ワンタイムパスワードが届いたら投稿します。見つかっても待ち受けは打ち切らず、"
@@ -521,17 +520,17 @@ async def _watch_new_mail(ctx, session, watch_seconds):
                 new_items = await asyncio.to_thread(session.poll_new)
             except Exception as e:
                 print(f"待ち受け中のエラー: {e}")
-                await ctx.send(f"⚠️ **待ち受けを終了しました。** 新着の確認中にエラーが発生しました: {e}")
+                await send(f"⚠️ **待ち受けを終了しました。** 新着の確認中にエラーが発生しました: {e}")
                 return
 
             for item in new_items:
                 if item['codes']:
                     found_with_code += 1
-                    await ctx.send("🔑 ワンタイムパスワードが届きました。")
-                    await ctx.send(embed=build_mail_embed(item, discord.Color.green()))
+                    await send("🔑 ワンタイムパスワードが届きました。")
+                    await send(embed=build_mail_embed(item, discord.Color.green()))
                 else:
                     seen_without_code += 1
-                    await ctx.send(embed=build_mail_embed(item, discord.Color.light_grey()))
+                    await send(embed=build_mail_embed(item, discord.Color.light_grey()))
 
         if found_with_code:
             summary = f"ワンタイムパスワードを{found_with_code}件お知らせしました。"
@@ -539,16 +538,17 @@ async def _watch_new_mail(ctx, session, watch_seconds):
             summary = "ワンタイムパスワードは届きませんでした。"
         if seen_without_code:
             summary += f"（コードを含まない新着が{seen_without_code}件ありました）"
-        await ctx.send(f"{'✅' if found_with_code else '⌛'} **待ち受けを終了しました。** {summary}")
+        await send(f"{'✅' if found_with_code else '⌛'} **待ち受けを終了しました。** {summary}")
     finally:
         active_watches.pop(ctx.channel.id, None)
 
 
-@bot.command(name='mail')
-async def check_mail(ctx, *args):
-    """最新のメールを表示し、続けて新着を待ち受けます。 例: /mail  /mail 5  /mail full"""
-    count, full = _parse_mail_args(args)
-
+@bot.hybrid_command(name='mail', description='最新のメールを表示し、続けて新着メールのワンタイムパスワードを待ち受けます')
+@app_commands.describe(
+    count=f'表示する件数（1〜10、既定{MAIL_DEFAULT_COUNT}件）',
+    full='本文を省略せず全文表示する',
+)
+async def check_mail(ctx, count: app_commands.Range[int, 1, 10] = MAIL_DEFAULT_COUNT, full: bool = False):
     await ctx.send("メールを確認しています...")
     session = MailSession()
     close_later = True
