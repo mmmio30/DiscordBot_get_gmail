@@ -1,0 +1,26 @@
+# main に push されたら、102 のセルフホストランナーで自動更新を実行する。
+# 更新処理そのもの（取り込み・構文チェック・再起動・ロールバック・通知）は
+# deploy/auto_update.sh が担い、ここではそのサービスを起動して結果を表示するだけ。
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 連続で push されても更新は1つずつ行う
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, discord-bot]
+    timeout-minutes: 15
+    steps:
+      - name: 自動更新を実行
+        run: sudo -n systemctl start discord-bot-update.service
+
+      - name: 更新ログ
+        if: always()
+        run: journalctl -u discord-bot-update.service --since "-15min" --no-pager -o cat
